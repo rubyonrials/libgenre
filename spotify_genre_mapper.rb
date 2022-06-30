@@ -54,8 +54,7 @@ def get_all_spotify_tracks
   my_tracks
 end
 
-def map_genre_to_tracks (tracks)
-  artist_to_genre = {} # Cache to avoide doing multiple getArtist API calls
+def map_genre_to_tracks (tracks, artist_to_genre_cache)
   genre_to_tracks = {}
   tracks.keys.each { |track_id|
     track_tuple = [track_id, tracks[track_id][:name]]
@@ -64,11 +63,11 @@ def map_genre_to_tracks (tracks)
     tracks[track_id][:artists].each { |artist|
       artist_genres = nil
 
-      if artist_to_genre.keys.include?(artist) # Cache hit
-        artist_genres = artist_to_genre[artist]
+      if artist_to_genre_cache.keys.include?(artist) # Cache hit
+        artist_genres = artist_to_genre_cache[artist]
       else
         artist_genres = json_request("https://api.spotify.com/v1/artists/#{artist}")["genres"]
-        artist_to_genre[artist] = artist_genres
+        artist_to_genre_cache[artist] = artist_genres
       end
 
       artist_genres.each { |genre|
@@ -133,8 +132,12 @@ def find_uncategorized_tracks(my_tracks, playlists_to_create)
 end
 
 def main
+  # API calls
   my_tracks = get_all_spotify_tracks
-  genre_to_tracks = map_genre_to_tracks(my_tracks)
+  artist_to_genre_cache = {} # Cache to avoide doing multiple getArtist API calls
+  genre_to_tracks = map_genre_to_tracks(my_tracks, artist_to_genre_cache)
+
+  # Processing
   playlists_to_create = process_genres_to_playlists(genre_to_tracks)
   uncategorized_tracks = find_uncategorized_tracks(my_tracks, playlists_to_create)
   playlists_to_create["uncategorized"] = uncategorized_tracks
@@ -142,6 +145,7 @@ def main
   puts playlists_to_create
   # What to do about conflicting artists on a single song? SEEB remix
   # Could sort by descending dancability?
+  # Could try reversing - create playlists for microgenres first (3+ songs)... or start with small genres of ... 10+ songs, move up, rather than mega genres and move down
 end
 
 main
