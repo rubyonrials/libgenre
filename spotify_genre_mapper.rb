@@ -10,20 +10,42 @@ if (!ARGV[0])
   return
 end
 BEARER_TOKEN = ARGV[0]
+POST = "POST"
+GOOD_RESPONSE_CODES = ["200", "201"]
 
-def json_request (url)
+def json_request (url, request_type = nil, body = nil)
   uri = URI.parse(url)
 
-  request = Net::HTTP::Get.new(uri)
+  request = nil
+  if (request_type == POST)
+    request = Net::HTTP::Post.new(uri)
+  else
+    request = Net::HTTP::Get.new(uri)
+  end
+
   request.content_type = "application/json"
   request["Accept"] = "application/json"
   request["Authorization"] = "Bearer #{BEARER_TOKEN}"
+  if (body)
+    request.body = JSON.dump(body)
+  end
 
   response = Net::HTTP.start(uri.hostname, uri.port, { use_ssl: uri.scheme == "https" }) do |http|
     http.request(request)
   end
 
+  puts_json_bug(response, "#{request_type || ''} #{url}")
   JSON.parse(response.body)
+end
+
+def puts_json_bug (response, error_message)
+  if !(GOOD_RESPONSE_CODES.include?(response.code))
+    puts "----- ERROR #{error_message}"
+    puts "----- ERROR CODE #{response.code}"
+    if response.body
+      puts "----- ERROR BODY #{response.body}"
+    end
+  end
 end
 
 def strip_tracks_response (response)
@@ -56,6 +78,8 @@ end
 
 def map_genre_to_tracks (tracks, artist_to_genre_cache)
   genre_to_tracks = {}
+  rate_limit_counter = 0
+
   tracks.keys.each { |track_id|
     track_tuple = [track_id, tracks[track_id][:name]]
 
@@ -66,8 +90,18 @@ def map_genre_to_tracks (tracks, artist_to_genre_cache)
       if artist_to_genre_cache.keys.include?(artist) # Cache hit
         artist_genres = artist_to_genre_cache[artist]
       else
+        if rate_limit_counter >= 100
+          sleep 31
+          rate_limit_counter = 0
+        end
+
         artist_genres = json_request("https://api.spotify.com/v1/artists/#{artist}")["genres"]
-        artist_to_genre_cache[artist] = artist_genres
+        rate_limit_counter += 1
+        puts artist_genres
+
+        if artist_genres
+          artist_to_genre_cache[artist] = artist_genres
+        end
       end
 
       artist_genres.each { |genre|
@@ -137,15 +171,41 @@ def main
   artist_to_genre_cache = {} # Cache to avoide doing multiple getArtist API calls
   genre_to_tracks = map_genre_to_tracks(my_tracks, artist_to_genre_cache)
 
-  # Processing
+  # Processing tracks into playlists
   playlists_to_create = process_genres_to_playlists(genre_to_tracks)
   uncategorized_tracks = find_uncategorized_tracks(my_tracks, playlists_to_create)
   playlists_to_create["uncategorized"] = uncategorized_tracks
+  # 95 / 150 63%, or 4600 / 5100 categorized is about 89%
+
+  # Creating playlists
+  USER_ID = "123345762" # This shouldn't be hard coded
+  playlists_to_create.keys.each do |genre|
+    new_playlist_response = json_request("https://api.spotify.com/v1/users/#{USER_ID}/playlists", POST, {
+      "name" => "My #{genre}",
+      "description" => "",
+      "public" => false
+    })
+
+    playlist_id = new_playlist_response["id"]
+    num_requests_needed = playlists_to_create[genre].count / 100
+    for offset in 0..num_requests_needed do
+      request_uris = playlists_to_create[genre][offset * 100 .. offset * 100 + 99].map { |track_tuple|
+        "spotify:track:#{track_tuple[0]}"
+      }
+
+      add_tracks_response = json_request("https://api.spotify.com/v1/playlists/#{playlist_id}/tracks", POST, { "uris" => request_uris })
+    end
+  end
 
   puts playlists_to_create
   # What to do about conflicting artists on a single song? SEEB remix
   # Could sort by descending dancability?
   # Could try reversing - create playlists for microgenres first (3+ songs)... or start with small genres of ... 10+ songs, move up, rather than mega genres and move down
+  #   Or the average of the largest genre count and smallest - rather than a set number. Too small ends up with too many playlists, too big loses resolution
+  # Is having all of the playlists a bad thing? Too many genres gets overwhelming
+  # This could be a parameter at some point - "prefer_general" "prefer_niche"
+  # Starting with smaller genres also captures more tracks into playlists, because these genres don't get pushed below the threshold by larger genres - "long tail"
+  # MapGenreToTracks should batch artists request so that bearer token does not expire
 end
 
 main
